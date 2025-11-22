@@ -1,2 +1,3 @@
 .venv
-Python-OpenCV/*
+Python-OpenCV/
+classifier/hanzi_dataset/
