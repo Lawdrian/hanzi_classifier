@@ -7,18 +7,19 @@ paths:
   scanned_data_dir: "data/scanned"      # Scanned images
   processed_data_dir: "data/processed"  # Processed images (datasets)
   dataset_name: "hanzi_dataset"         # Dataset name
+  checkpoint_dir: "checkpoints"         # Model Checkpoints
 
 # -----------------------------------------------------------------------------
 # 2. Data Processing & Generation
 # Parameters used by 'create_dataset' script
 # -----------------------------------------------------------------------------
 processing:
-  source_img: "sheet1.jpg"              # The original handwritten sheet
-  scanned_img: "sheet1_scan.jpg"        # The scanned sheet
+  source_img: "sheet2.jpg"              # The original handwritten sheet
+  scanned_img: "sheet2_scan.jpg"        # The scanned sheet
   iters: 2                              # Number of repetitions (A,B,C -> A,B,C Principle)
   
   # Image preprocessing
-  target_height: 32
+  target_height: &target_height 32
   target_width: 32
   grayscale: true
 
@@ -40,8 +41,15 @@ classes:
 # Parameters used by training script
 # -----------------------------------------------------------------------------
 training:
+  # Model
+  model_name: "hanzi_conv"
+  in_size: *target_height
+  in_channels: 1
+  kernel_size: 3
+  # Training
   batch_size: 32
   learning_rate: 0.001
-  epochs: 20
+  max_epochs: 200
+  eval_interval: 5
   seed: 42                     
   device: "cuda"                     
