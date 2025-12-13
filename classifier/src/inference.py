@@ -60,8 +60,8 @@ class HanziClassifier:
         self.model = self.model.to(self.device)
         self.model.eval()
         
-        # Get transforms
-        self.transforms = get_image_transforms()
+        # Get transforms with correct resize
+        self.transforms = get_image_transforms(resize=in_size)
         
         print(f"Model loaded successfully. Classes: {self.class_names}")
     

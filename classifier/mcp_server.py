@@ -1,5 +1,6 @@
 import base64
 import io
+import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -7,11 +8,12 @@ import torch
 from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel
-from src.inference import HanziClassifier
-import sys
 
+# Add classifier directory to path BEFORE importing local modules
 CLASSIFIER_DIR = Path(__file__).parent
 sys.path.insert(0, str(CLASSIFIER_DIR))
+
+from src.inference import HanziClassifier
 from src.utils import load_config, get_device
 
 

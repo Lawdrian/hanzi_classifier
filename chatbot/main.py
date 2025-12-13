@@ -1,0 +1,195 @@
+"""
+main.py — Streamlit UI and wiring
+graph_builder.py — constructs and compiles the langgraph StateGraph
+tools.py — tool definitions (pure functions, small wrappers)
+agent_runner.py — functions to invoke compiled agent and return outputs
+state_store.py — tiny wrapper around st.session_state
+visualize.py — generates PNG bytes for st.image
+config.py — env var parsing
+requirements.txt, README.md, tests under tests/
+"""
+
+import uuid
+import os
+import streamlit as st
+from langchain.messages import HumanMessage, AIMessage, ToolMessage
+from agent_runner import build_and_compile_agent
+from typing import Dict, Any
+import base64
+
+st.set_page_config(page_title="LangGraph Hanzi Agent", layout="centered")
+
+
+@st.cache_resource
+def get_agent_and_builder():
+    return build_and_compile_agent()
+
+
+def render_chat_history(messages: list):
+    """
+    Directly renders the LangGraph message history using Streamlit chat elements.
+    """
+    
+    # Iterate through the LangGraph message history
+    for msg in messages:
+        
+        #  1. User Messages
+        if isinstance(msg, HumanMessage):
+            with st.chat_message("user"):
+                st.markdown(msg.content)
+
+        # 2. AI Messages (LLM messages + TOOL Invokations)
+        elif isinstance(msg, AIMessage):
+            # If the AI has tool calls, render them nicely
+            if msg.tool_calls:
+                with st.chat_message("assistant"):
+                    # Create an expander for "Thought Process" to keep UI clean
+                    with st.status("🤖 Agent is thinking...", expanded=False) as status:
+                        for tool in msg.tool_calls:
+                            st.write(f"**Calling Tool:** `{tool['name']}`")
+                            st.json(tool['args'])
+                        status.update(label="✅ Tools invoked", state="complete")
+                    
+                    # If there is also text content along with the tool call
+                    if msg.content:
+                        st.markdown(msg.content)
+            
+            # Normal AI response without tools
+            elif msg.content:
+                with st.chat_message("assistant"):
+                    st.markdown(msg.content)
+
+        # 3. Tool Outputs
+        elif isinstance(msg, ToolMessage): # TODO Decide if actually wanna show or not
+            with st.expander(f"Tool Output: {msg.name}"):
+                 st.code(msg.content)
+
+
+def run_agent_sync(agent, message: str|None, config):
+    """
+    Run the agent synchronously.
+    """
+    content = {"messages": [HumanMessage(message)]} if message else None
+    result = agent.invoke(content, config)
+    return result
+
+
+def sidebar(agent=None, thread_id: str | None = None):
+    st.sidebar.header("Upload Image")
+    
+    upload_method = st.sidebar.radio("Choose input method:", ["Upload File", "Take Photo"])
+    
+    image_bytes = None
+    if upload_method == "Upload File":
+        uploaded_file = st.sidebar.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+        if uploaded_file:
+            image_bytes = uploaded_file.read()
+    else:
+        camera_photo = st.sidebar.camera_input("Take a photo")
+        if camera_photo:
+            image_bytes = camera_photo.getvalue()
+    
+    # If image uploaded, convert to base64 and store
+    if image_bytes:
+        image_base64 = base64.b64encode(image_bytes).decode()
+        st.sidebar.success("✅ Image uploaded!")
+        st.sidebar.image(image_bytes, caption="Current image")
+        
+        # If graph was waiting for image, push to agent state and resume
+        if agent and thread_id:
+            try:
+                config = {"configurable": {"thread_id": thread_id}}
+                # Persist image into the LangGraph state
+                agent.update_state(config, {"image": image_base64})
+                # Always check current checkpoint state before deciding to resume
+                current_state = agent.get_state(config)
+                is_waiting = current_state.next and "wait_for_image" in current_state.next
+                if is_waiting:
+                    # Resume without additional user input
+                    agent.invoke(None, config)
+                    st.rerun()
+            except Exception as e:
+                st.sidebar.warning(f"Could not resume agent automatically: {e}")
+def checkpoint_state_to_ui_history(state: Dict[str, Any]) -> list:
+    """
+    Convert the LangGraph state (which may contain LangChain message objects) into
+    a simple list of text lines for display and persistence in Streamlit session state.
+    """
+    out = []
+    msgs = state.get("messages", [])
+    print("Num Messages to render:", len(msgs))
+    for m in msgs:
+        # Try to extract a human-readable content
+        content = getattr(m, "content", "")
+        if not content:
+                tool_calls = getattr(m, "tool_calls", None)
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        content += f"[Tool Call: {tool_call.get('name', 'unknown')}]"
+        if not content:
+            content = str(m)
+
+        role = getattr(m, "type", None) 
+        if role:
+            out.append(f"{role.upper()}: {content}")
+        else:
+            out.append(content)
+    return out
+
+def main():
+    agent, builder = get_agent_and_builder()
+    # Ensure a per-session thread id for checkpointer
+    if "thread_id" not in st.session_state:
+        print("Initialize thread_id")
+        st.session_state.thread_id = str(uuid.uuid4())
+
+
+    # Render Graph
+    try:
+        st.header("Graph")
+        png = builder.render_graph(agent)
+        st.image(png)
+    except Exception:
+        pass
+
+    # Show sidebar
+    sidebar(agent, st.session_state.thread_id)
+
+    # Main chat area
+    st.header("Chat")
+
+    # 1. Show chat history
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    snapshot = agent.get_state(config)
+    messages = []
+    if snapshot.values:
+        messages = snapshot.values.get("messages", [])
+    render_chat_history(messages)
+
+    # 2. Handle interrupt (waiting for image) — check checkpoint, not session state
+    is_waiting_for_image = snapshot.next and "wait_for_image" in snapshot.next
+    if is_waiting_for_image:
+        st.warning("⏸️ Waiting for image upload. Please upload or take a photo in the sidebar above.")
+        return  # Don't show chat input
+    
+
+    # 3. Chat input (only if not interrupted)
+    prompt = "Enter a question about arithmetic or ask for hanzi classification"
+    user_input = st.chat_input(prompt)
+
+    if user_input:
+        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+        # Run agent
+        try:
+            with st.spinner("Agent thinking..."):
+                run_agent_sync(agent, message=user_input, config=config)
+        except Exception as e:
+            st.error(f"Agent invocation failed: {e}")
+            return
+
+        st.rerun()  # Rerun to show updated conversation
+
+
+if __name__ == "__main__":
+    main()

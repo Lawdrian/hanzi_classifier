@@ -5,22 +5,33 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 
-def get_image_transforms():
+def get_image_transforms(resize=None):
     """Get the image transformation pipeline for training and inference.
+    
+    Args:
+        resize (int, optional): Target size for resizing. If provided, images will be resized to (resize, resize)
     
     Returns:
         transforms.Compose: Composed transformations
     """
-    return transforms.Compose([
+    transform_list = [
         # 1. Ensure grayscale (1 channel)
-        transforms.Grayscale(num_output_channels=1), 
-        
+        transforms.Grayscale(num_output_channels=1),
+    ]
+    
+    # Add resize if specified
+    if resize is not None:
+        transform_list.append(transforms.Resize((resize, resize)))
+    
+    transform_list.extend([
         # 2. Scale to [0.0, 1.0]; Change shape to [C, H, W]
         transforms.ToTensor(), 
         
         # 3. Normalization
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
+    
+    return transforms.Compose(transform_list)
 
 
 def load_datasets(config, project_root):
