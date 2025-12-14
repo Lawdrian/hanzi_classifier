@@ -10,15 +10,15 @@ requirements.txt, README.md, tests under tests/
 """
 
 import uuid
-import os
 import streamlit as st
 from langchain.messages import HumanMessage, AIMessage, ToolMessage
 from agent_runner import build_and_compile_agent
-from typing import Dict, Any
 import base64
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 
 st.set_page_config(page_title="LangGraph Hanzi Agent", layout="centered")
-
+LANGFUSE_HANDLER = CallbackHandler()
 
 @st.cache_resource
 def get_agent_and_builder():
@@ -98,11 +98,15 @@ def sidebar(agent=None, thread_id: str | None = None):
         # If graph was waiting for image, push to agent state and resume
         if agent and thread_id:
             try:
-                config = {"configurable": {"thread_id": thread_id}}
-                # Persist image into the LangGraph state
-                agent.update_state(config, {"image": image_base64})
-                # Always check current checkpoint state before deciding to resume
+                config = {"configurable": {"thread_id": thread_id}, "callbacks": [LANGFUSE_HANDLER]}
                 current_state = agent.get_state(config)
+                existing_image = (current_state.values or {}).get("image")
+
+                if image_base64 != existing_image:
+                    # Persist image into the LangGraph state
+                    agent.update_state(config, {"image": image_base64})
+                
+
                 is_waiting = current_state.next and "wait_for_image" in current_state.next
                 if is_waiting:
                     # Resume without additional user input
@@ -110,39 +114,16 @@ def sidebar(agent=None, thread_id: str | None = None):
                     st.rerun()
             except Exception as e:
                 st.sidebar.warning(f"Could not resume agent automatically: {e}")
-def checkpoint_state_to_ui_history(state: Dict[str, Any]) -> list:
-    """
-    Convert the LangGraph state (which may contain LangChain message objects) into
-    a simple list of text lines for display and persistence in Streamlit session state.
-    """
-    out = []
-    msgs = state.get("messages", [])
-    print("Num Messages to render:", len(msgs))
-    for m in msgs:
-        # Try to extract a human-readable content
-        content = getattr(m, "content", "")
-        if not content:
-                tool_calls = getattr(m, "tool_calls", None)
-                if tool_calls:
-                    for tool_call in tool_calls:
-                        content += f"[Tool Call: {tool_call.get('name', 'unknown')}]"
-        if not content:
-            content = str(m)
 
-        role = getattr(m, "type", None) 
-        if role:
-            out.append(f"{role.upper()}: {content}")
-        else:
-            out.append(content)
-    return out
 
 def main():
     agent, builder = get_agent_and_builder()
+    langfuse = get_client()
+    langfuse.flush()
     # Ensure a per-session thread id for checkpointer
     if "thread_id" not in st.session_state:
         print("Initialize thread_id")
         st.session_state.thread_id = str(uuid.uuid4())
-
 
     # Render Graph
     try:
@@ -178,7 +159,7 @@ def main():
     user_input = st.chat_input(prompt)
 
     if user_input:
-        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+        config = {"configurable": {"thread_id": st.session_state.thread_id}, "callbacks": [LANGFUSE_HANDLER]}
 
         # Run agent
         try:
