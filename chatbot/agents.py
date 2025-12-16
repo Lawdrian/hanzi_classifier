@@ -1,6 +1,7 @@
 from langchain.messages import SystemMessage, AIMessage
 from typing import Callable
 from classifier_mcp_client import ClassifierMCPClient
+from langfuse import get_client
 
 
 def make_front_desk_agent(model_with_tools) -> Callable[[dict], dict]:
@@ -12,17 +13,12 @@ def make_front_desk_agent(model_with_tools) -> Callable[[dict], dict]:
     def front_desk_agent(state: dict) -> dict:
         print("llm_call called!")
         
-        # Build system prompt dynamically based on image availability
-        image_status = "An image has been uploaded and is available for classification." if state.get("image") else "No image has been uploaded yet."
-        
         system = SystemMessage(content=f"""You are a helpful assistant. 
 You can use tools one at a time. After using a tool, wait for the result.
 You can:
 - Help with arithmetic
 - Chat with the user
 - Perform a classification for hanzi character images
-
-Image Status: {image_status}
 
 When a user wants to classify a hanzi image:
 1. Call the appropriate tool to invoke the classification
@@ -59,6 +55,11 @@ def make_classify_node(classifier_mcp_client: ClassifierMCPClient) -> Callable[[
             # Format confidence scores for display
             confidence_str = f"{confidence * 100:.1f}%"
             
+            langfuse = get_client()
+            langfuse.score_current_trace(value=confidence, data_type="NUMERIC", name="classification_confidence")
+            langfuse.score_current_trace(value=pred_class, data_type="CATEGORICAL", name="classification_result")
+            langfuse.flush()
+            print("Logged classification results to Langfuse.")
             return {
                 "messages": [AIMessage(content=f"Result Classified: '{pred_class}' (confidence {confidence_str})")],
                 "classification_result": pred_class,
