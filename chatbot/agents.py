@@ -1,5 +1,6 @@
-from langchain.messages import SystemMessage, AIMessage, HumanMessage
-from typing import Callable, Union, Literal
+from langchain.messages import SystemMessage, AIMessage, HumanMessage, AnyMessage
+from typing import Callable, Union, Literal, Any
+from collections import deque
 from classifier_mcp_client import ClassifierMCPClient
 from langfuse import get_client
 from pydantic import BaseModel, Field
@@ -29,6 +30,11 @@ class CalculationParams(BaseModel):
     operand2: float = Field(description="Second operand")
 
 
+class FinalResponseParams(BaseModel):
+    """Parameters for final response to user (no subgraph needed)"""
+    message: str = Field(description="The final response message to send to the user")
+
+
 # ============================================================================
 # DISPATCHER DECISION SCHEMA
 # ============================================================================
@@ -36,8 +42,8 @@ class CalculationParams(BaseModel):
 class DispatchAction(BaseModel):
     """The dispatcher's decision on which subgraph to invoke"""
     reasoning: str = Field(description="Brief logic for choosing this subgraph")
-    task: Union[AskUserParams, HanziClassificationParams, CalculationParams] = Field(
-        description="The parameters for the chosen subgraph"
+    task: Union[AskUserParams, HanziClassificationParams, CalculationParams, FinalResponseParams] = Field(
+        description="The parameters for the chosen subgraph or final response"
     )
 
     @property
@@ -49,6 +55,8 @@ class DispatchAction(BaseModel):
             return "hanzi_classification_subgraph"
         if isinstance(self.task, CalculationParams):
             return "calculation_subgraph"
+        if isinstance(self.task, FinalResponseParams):
+            return "__end__"  # No subgraph needed, route to end
         return "error_node"
 
 
@@ -75,15 +83,22 @@ Output the plan as a numbered list. Be specific about what needs to happen in ea
         
         response = model.invoke([system] + state.get("messages", []))
         
+        # Add metadata for UI filtering
+        response.metadata = {
+            "verbose_level": "user",  # "user", "info", or "debug"
+            "agent": "orchestrator",
+            "step": "planning"
+        }
+        
         # Extract the plan from the response
         plan_text = response.content if hasattr(response, 'content') else str(response)
         # Simple parsing: split by newlines and filter empty lines
         plan_steps = [step.strip() for step in plan_text.split('\n') if step.strip()]
-        
+        print("🎯 Orchestrator: Plan created:")
+        print(plan_steps)
         return {
             "messages": [response],
-            "plan": plan_steps,
-            "plan_index": 0,
+            "plan_queue": deque(plan_steps),
             "llm_calls": state.get("llm_calls", 0) + 1
         }
     
@@ -94,22 +109,24 @@ Output the plan as a numbered list. Be specific about what needs to happen in ea
 # EXECUTE STEP (DISPATCHER) AGENT
 # ============================================================================
 
-def make_execute_step(model) -> Callable[[dict], dict]:
+def make_execute_step(model) -> Callable[[dict, Any], dict]:
     """
     The Execute Step node dispatches each plan step to the appropriate subgraph.
-    It uses structured output to determine which subgraph to invoke and what parameters to pass.
+    Returns a dict with 'next_node' field for conditional routing.
     """
-    def execute_step(state: dict, config) -> Command:
-        print(f"📋 Execute Step: Processing plan step {state.get('plan_index', 0)}")
-        
-        plan = state.get("plan", [])
-        plan_index = state.get("plan_index", 0)
+    def execute_step(state: dict, config) -> dict:
+        plan_queue = state.get("plan_queue", deque())
         
         # Check if we've finished all plan steps
-        if plan_index >= len(plan):
-            return Command(goto="END")
+        if not plan_queue:
+            print("✅ Plan queue empty, routing to END")
+            return {
+                "next_node": "__end__",
+                "plan_queue": plan_queue
+            }
         
-        current_step = plan[plan_index]
+        current_step = plan_queue.popleft()
+        print(f"📋 Execute Step: Processing '{current_step}'")
         messages = state.get("messages", [])
         image = state.get("image")
         
@@ -129,17 +146,31 @@ Based on this step, decide which subgraph to invoke and what parameters to use."
             {"role": "user", "content": context}
         ])
         
-        # Route to the chosen subgraph with parameters
-        return Command(
-            goto=decision.target_node,
-            update={
-                "active_task": decision.task.model_dump(),
-                "plan_index": plan_index + 1,
-                "llm_calls": state.get("llm_calls", 0) + 1
-            }
-        )
+        # Handle FinalResponseParams specially - add message before ending
+        final_message = []
+        if isinstance(decision.task, FinalResponseParams):
+            msg = AIMessage(
+                content=decision.task.message,
+                metadata={
+                    "verbose_level": "user",
+                    "agent": "orchestrator",
+                    "step": "final_response"
+                }
+            )
+            final_message.append(msg)
+            print(f"💬 Final Response: {decision.task.message[:100]}...")
+        
+        # Return dict updating state with active_task, plan_queue, and next_node
+        return {
+            "active_task": decision.task.model_dump(),
+            "plan_queue": plan_queue,
+            "llm_calls": state.get("llm_calls", 0) + 1,
+            "next_node": decision.target_node,
+            "messages": final_message
+        }
     
     return execute_step
+
 
 
 # ============================================================================
@@ -150,9 +181,10 @@ class AskUserInternalState(TypedDict):
     """State for Ask User subgraph"""
     active_task: dict  # Contains AskUserParams
     user_response: str
+    messages: Annotated[list[AnyMessage], operator.add]  # Share with parent
 
 
-def make_ask_user_subgraph_start(model) -> Callable[[dict], dict]:
+def make_ask_user_subgraph_start(model) -> Callable[[AskUserInternalState], dict]:
     """
     Entry point for Ask User subgraph.
     Extracts the question and prompts the user.
@@ -163,8 +195,19 @@ def make_ask_user_subgraph_start(model) -> Callable[[dict], dict]:
         
         print(f"❓ Ask User: {question}")
         
+        # Create message asking the user
+        msg = AIMessage(
+            content=question,
+            metadata={
+                "verbose_level": "user",
+                "agent": "ask_user",
+                "step": "hitl_question"
+            }
+        )
+        
         return {
-            "user_response": ""  # Will be filled by HITL interrupt
+            "user_response": "",  # Will be filled by HITL interrupt
+            "messages": [msg]
         }
     
     return ask_user_start
@@ -179,9 +222,10 @@ class HanziClassificationInternalState(TypedDict):
     active_task: dict  # Contains HanziClassificationParams
     classification_result: str
     classification_confidence: float
+    messages: Annotated[list[AnyMessage], operator.add]  # Share with parent
 
 
-def make_hanzi_classification_start() -> Callable[[dict], dict]:
+def make_hanzi_classification_start() -> Callable[[HanziClassificationInternalState], dict]:
     """
     Entry point for Hanzi Classification subgraph.
     Validates the image and prepares for classification.
@@ -192,8 +236,10 @@ def make_hanzi_classification_start() -> Callable[[dict], dict]:
         
         if not image:
             return {
-                "classification_result": "ERROR",
-                "classification_confidence": 0.0
+                "current_output": {   
+                    "classification_result": "ERROR",
+                    "classification_confidence": 0.0
+                }
             }
         
         print("🎯 Hanzi Classifier: Starting classification...")
@@ -202,7 +248,7 @@ def make_hanzi_classification_start() -> Callable[[dict], dict]:
     return hanzi_classification_start
 
 
-def make_classify_node_v2(classifier_mcp_client: ClassifierMCPClient) -> Callable[[dict], dict]:
+def make_classify_node(classifier_mcp_client: ClassifierMCPClient) -> Callable[[HanziClassificationInternalState], dict]:
     """Perform image classification using the MCP server (v2 - for new architecture)"""
     def classify_node(state: HanziClassificationInternalState) -> dict:
         task = state.get("active_task", {})
@@ -210,8 +256,10 @@ def make_classify_node_v2(classifier_mcp_client: ClassifierMCPClient) -> Callabl
         
         if not image_base64:
             return {
-                "classification_result": "ERROR: No image",
-                "classification_confidence": 0.0
+                "current_output": {                
+                    "classification_result": "ERROR: No image",
+                    "classification_confidence": 0.0
+                }
             }
         
         try:
@@ -224,15 +272,28 @@ def make_classify_node_v2(classifier_mcp_client: ClassifierMCPClient) -> Callabl
             
             print(f"✅ Hanzi Classifier: {pred_class} (confidence {confidence * 100:.1f}%)")
             
+            # Create message with classification result
+            msg = AIMessage(
+                content=f"Classification: {pred_class} (confidence: {confidence*100:.1f}%)",
+                metadata={
+                    "verbose_level": "user",
+                    "agent": "hanzi_classifier",
+                    "step": "classification"
+                }
+            )
+            
             return {
                 "classification_result": pred_class,
-                "classification_confidence": float(confidence)
+                "classification_confidence": float(confidence),
+                "messages": [msg]
             }
         except Exception as e:
             print(f"❌ Classification error: {e}")
             return {
-                "classification_result": f"ERROR: {str(e)}",
-                "classification_confidence": 0.0
+                "current_output": {   
+                    "classification_result": f"ERROR: {str(e)}",
+                    "classification_confidence": 0.0
+                }
             }
     
     return classify_node
@@ -246,9 +307,10 @@ class CalculationInternalState(TypedDict):
     """State for Calculation subgraph"""
     active_task: dict  # Contains CalculationParams
     calculation_result: float
+    messages: Annotated[list[AnyMessage], operator.add]  # Share with parent
 
 
-def make_calculation_subgraph_start() -> Callable[[dict], dict]:
+def make_calculation_subgraph_start() -> Callable[[CalculationInternalState], dict]:
     """
     Entry point for Calculation subgraph.
     Extracts and validates the operation parameters.
@@ -266,7 +328,7 @@ def make_calculation_subgraph_start() -> Callable[[dict], dict]:
     return calculation_start
 
 
-def make_calculation_executor() -> Callable[[dict], dict]:
+def make_calculation_executor() -> Callable[[CalculationInternalState], dict]:
     """
     Execute the actual calculation based on the operation.
     """
@@ -288,84 +350,19 @@ def make_calculation_executor() -> Callable[[dict], dict]:
         
         print(f"🧮 Result: {result}")
         
-        return {"calculation_result": result}
+        # Create message with calculation result
+        msg = AIMessage(
+            content=f"Calculation result: {result}",
+            metadata={
+                "verbose_level": "user",
+                "agent": "calculator",
+                "step": "calculation"
+            }
+        )
+        
+        return {
+            "calculation_result": result,
+            "messages": [msg]
+        }
     
     return calculate
-
-
-# ============================================================================
-# LEGACY FUNCTIONS (DEPRECATED - kept for backward compatibility)
-# ============================================================================
-
-def make_front_desk_agent(model_with_tools) -> Callable[[dict], dict]:
-    """
-    [DEPRECATED] Legacy front desk agent - replaced by orchestrator + dispatcher pattern.
-    Return a node function `front_desk_agent(state: dict) -> dict` bound to the provided model_with_tools.
-    """
-    def front_desk_agent(state: dict) -> dict:
-        print("llm_call called!")
-        
-        system = SystemMessage(content=f"""You are a helpful assistant. 
-You can use tools one at a time. After using a tool, wait for the result.
-You can:
-- Help with arithmetic
-- Chat with the user
-- Perform a classification for hanzi character images
-
-When a user wants to classify a hanzi image:
-1. Call the appropriate tool to invoke the classification
-
-IMPORTANT: When you see a classification result, do not invoke the classification tool again, but instead tell the user the result you got.
-""")
-        response = model_with_tools.invoke([system] + state["messages"])
-        
-        result = {
-            "messages": [response],
-            "llm_calls": state.get("llm_calls", 0) + 1
-        }
-        
-        return result
-    return front_desk_agent
-
-
-def make_classify_node(classifier_mcp_client: ClassifierMCPClient) -> Callable[[dict], dict]:
-    """
-    [DEPRECATED] Legacy classification node - replaced by make_classify_node_v2().
-    """
-    def classify_node(state: dict) -> dict:
-        """Perform image classification using the MCP server."""
-        
-        image_base64 = state.get("image")
-        
-        if not image_base64:
-            return {
-                "messages": [AIMessage(content="Error: No image available for classification.")],
-                "classification_result": None,
-                "classification_confidence": 0.0
-            }
-        
-        try:
-            # Call the classifier server
-            pred_class, confidence, all_confidences = classifier_mcp_client.classify(image_base64)
-            
-            # Format confidence scores for display
-            confidence_str = f"{confidence * 100:.1f}%"
-            
-            langfuse = get_client()
-            langfuse.score_current_trace(value=confidence, data_type="NUMERIC", name="classification_confidence")
-            langfuse.score_current_trace(value=pred_class, data_type="CATEGORICAL", name="classification_result")
-            langfuse.flush()
-            print("Logged classification results to Langfuse.")
-            return {
-                "messages": [AIMessage(content=f"Result Classified: '{pred_class}' (confidence {confidence_str})")],
-                "classification_result": pred_class,
-                "classification_confidence": float(confidence)
-            }
-        except Exception as e:
-            print(f"Classification error: {e}")
-            return {
-                "messages": [AIMessage(content=f"Error during classification: {str(e)}")],
-                "classification_result": None,
-                "classification_confidence": 0.0
-            }
-    return classify_node

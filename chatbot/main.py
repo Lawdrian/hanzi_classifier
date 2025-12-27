@@ -57,6 +57,14 @@ def render_chat_history(messages: list):
             # Normal AI response without tools
             elif msg.content:
                 with st.chat_message("assistant"):
+                    # Show header if metadata exists
+                    metadata = getattr(msg, 'metadata', {}) or {}
+                    agent = metadata.get('agent', 'assistant')
+                    step = metadata.get('step', '')
+                    
+                    if agent and step:
+                        st.caption(f"**{agent.replace('_', ' ').title()} → {step.replace('_', ' ')}**")
+                    
                     st.markdown(msg.content)
 
         # 3. Tool Outputs
