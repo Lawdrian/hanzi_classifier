@@ -1,0 +1,10 @@
+[project]
+name = "hanzi-translator"
+version = "0.1.0"
+description = "Translator codebase with local GGUF model"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+  "fastmcp",
+  "llama-cpp-python",
+]
