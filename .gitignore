@@ -1,6 +1,5 @@
 .env
-.venv_ml
-.venv_chatbot
+.venv
 Python-OpenCV/
 classifier/data/processed/
 __pycache__/
