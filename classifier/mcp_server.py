@@ -1,28 +1,42 @@
 import base64
-import io
 import sys
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
-import torch
-from fastapi import FastAPI, HTTPException
-from PIL import Image
-from pydantic import BaseModel
 
+import torch
+from fastapi import HTTPException
+from pydantic import BaseModel
+from fastmcp import FastMCP
+
+from src.utils import get_device
+
+# 1. SETUP PATHS
 # Add classifier directory to path BEFORE importing local modules
 CLASSIFIER_DIR = Path(__file__).parent
 sys.path.insert(0, str(CLASSIFIER_DIR))
 
+# Import your local module
 from src.inference import HanziClassifier
-from src.utils import load_config, get_device
 
 
-# Initialize classifier on startup
+# 3. GLOBAL STATE
+# Define the variable
 classifier: Optional[HanziClassifier] = None
 
+# 4. DATA MODELS
+class ClassifyRequest(BaseModel):
+    image_base64: str
+    return_confidence: bool = True
 
+class ClassifyResponse(BaseModel):
+    predicted_class: str
+    confidence: float
+    all_confidences: dict[str, float]
+
+# 5. LIFECYCLE EVENTS
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(server: FastMCP):
     """Manage classifier lifecycle."""
     global classifier
     
@@ -49,41 +63,16 @@ async def lifespan(app: FastAPI):
     print("Shutting down classifier")
 
 
-# Initialize API App
-app = FastAPI(
-    title="Hanzi Classifier MCP Server",
-    description="MCP server for Hanzi character classification",
-    version="1.0.0",
-    lifespan=lifespan
-)
+# 2. INITIALIZE SERVER
+mcp = FastMCP("Classifier", lifespan=lifespan)
 
 
-# Request/Response models
-class ClassifyRequest(BaseModel):
-    """Request model for image classification."""
-    image_base64: str
-    return_confidence: bool = True
-
-
-class ClassifyResponse(BaseModel):
-    """Response model for classification results."""
-    predicted_class: str
-    confidence: float
-    all_confidences: dict[str, float]
-
-
-@app.post("/classify", response_model=ClassifyResponse)
+# 6. TOOLS
+@mcp.tool()
 async def classify_image(request: ClassifyRequest) -> ClassifyResponse:
-    """Classify a Hanzi character image.
-    
-    Args:
-        request: Contains base64-encoded image and options
-        
-    Returns:
-        Classification results with predicted class and confidence scores
-    """
+    """Classify a Hanzi character image."""
     if classifier is None:
-        raise HTTPException(status_code=503, detail="Classifier not initialized")
+        raise HTTPException(status_code=503, detail="Classifier is still loading or failed to load.")
     
     try:
         # Decode base64 image
@@ -104,8 +93,7 @@ async def classify_image(request: ClassifyRequest) -> ClassifyResponse:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error classifying image: {str(e)}")
 
-
-@app.get("/health")
+@mcp.tool()
 async def health_check():
     """Health check endpoint."""
     return {
@@ -114,25 +102,6 @@ async def health_check():
         "device": "cuda" if torch.cuda.is_available() else "cpu"
     }
 
-
-@app.get("/classes")
-async def get_classes():
-    """Get available class names."""
-    if classifier is None:
-        raise HTTPException(status_code=503, detail="Classifier not initialized")
-    
-    return {
-        "classes": classifier.class_names,
-        "num_classes": len(classifier.class_names)
-    }
-
-
 if __name__ == "__main__":
-    import uvicorn
-    
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="info"
-    )
+    # mcp.run() will enter the lifespan context automatically.
+    mcp.run(transport="sse", host="0.0.0.0", port=8001)
