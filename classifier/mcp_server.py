@@ -104,4 +104,4 @@ async def health_check():
 
 if __name__ == "__main__":
     # mcp.run() will enter the lifespan context automatically.
-    mcp.run(transport="sse", host="0.0.0.0", port=8001)
+    mcp.run(transport="http", host="0.0.0.0", port=8001)

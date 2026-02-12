@@ -17,6 +17,7 @@ dependencies = [
     "langgraph",
     "langsmith",
     "numpy",
+    "fastmcp",
     "openai",
     "pandas",
     "pillow",

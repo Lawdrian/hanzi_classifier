@@ -150,7 +150,7 @@ def sidebar(agent=None, langfuse: Langfuse = None, thread_id: str | None = None)
                             trace.update(output={"status": "success", "info": "Image persisted to graph state"})
                 
 
-                is_waiting = current_state.next and "wait_for_image" in current_state.next
+                is_waiting = current_state.next and "wait_for_user" in current_state.next
                 if is_waiting:
                     # Resume without additional user input
                     run_agent_sync(agent, langfuse, message=None, config=cb_config, thread_id=thread_id)
@@ -167,6 +167,8 @@ def main():
     if "thread_id" not in st.session_state:
         print("Initialize thread_id")
         st.session_state.thread_id = str(uuid.uuid4())
+
+    st.title("Multi-Modal Agent")
 
     # Render Graph
     try:
@@ -191,7 +193,7 @@ def main():
     render_chat_history(messages)
 
     # 2. Handle interrupt (waiting for image) — check checkpoint, not session state
-    is_waiting_for_image = snapshot.next and "wait_for_image" in snapshot.next
+    is_waiting_for_image = snapshot.next and "wait_for_user" in snapshot.next
     if is_waiting_for_image:
         st.warning("⏸️ Waiting for image upload. Please upload or take a photo in the sidebar above.")
         return  # Don't show chat input
