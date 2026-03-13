@@ -1,0 +1,34 @@
+# -----------------------------------------------------------------------------
+# 1. Global Paths
+# -----------------------------------------------------------------------------
+paths:
+  dataset5: "data/dummy_OCR5"
+  dataset10: "data/dummy_OCR10"
+  train_labels_csv: "train_labels.csv"
+  train_img_dir: "train_images"
+  val_labels_csv: "val_labels.csv"
+  val_img_dir: "val_images"
+  vocab_path: "vocab.txt"
+  save_dir: "checkpoints"
+
+# -----------------------------------------------------------------------------
+# 2. Model Configuration
+# -----------------------------------------------------------------------------
+model:
+  model_name: "multi_char_classifier"
+  img_channel: 1
+  rnn_hidden: 256
+  # num_class will be determined by vocab length
+
+# -----------------------------------------------------------------------------
+# 3. Training Hyperparameters
+# Parameters used by training script
+# -----------------------------------------------------------------------------
+training:
+  batch_size: 16
+  learning_rate: 0.0001
+  max_epochs: 5
+  eval_interval: 1
+  checkpoint_interval: 5
+
+  

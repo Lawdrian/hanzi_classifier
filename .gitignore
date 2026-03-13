@@ -4,3 +4,5 @@ Python-OpenCV/
 classifier/data/processed/
 __pycache__/
 *.gguf 
+data/
+output/

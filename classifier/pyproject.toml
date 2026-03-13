@@ -5,7 +5,7 @@ description = "Classifier codebase"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-  "fastmcp", 
+  "fastmcp",
   "pydantic<2.12",
   "torch",
   "torchvision",
@@ -18,7 +18,9 @@ dependencies = [
   "fastapi",
   "jupyter",
   "streamlit",
-  "matplotlib"
+  "matplotlib",
+  "paddleocr>=3.4.0",
+  "paddlepaddle>=3.3.0",
 ]
 
 [[tool.uv.index]]
